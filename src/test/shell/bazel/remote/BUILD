@@ -26,6 +26,7 @@ sh_test(
         ":remote_utils",
         ":uds_proxy.py",
         "//src/test/shell/bazel:test-deps",
+        "//src/test/tools/grpcdecoder:grpc_check_disk_cache_with_no_remote_exec_dep",
         "//src/tools/remote:worker",
         "@bazel_tools//tools/bash/runfiles",
     ],

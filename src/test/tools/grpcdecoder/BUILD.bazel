@@ -1,0 +1,22 @@
+java_binary(
+    name = "grpc_check_disk_cache_with_no_remote_exec_dep",
+    main_class = "src.test.tools.grpcdecoder.GrpcCheckDiskCacheWithNoRemoteExecDep",
+    visibility = ["//visibility:public"],
+    runtime_deps = [
+        ":client",
+    ],
+)
+
+java_library(
+    name = "client",
+    srcs = glob(["*.java"]),
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@com_google_protobuf//:protobuf_java",
+        "@googleapis//:google_longrunning_operations_java_proto",
+        "@googleapis//:google_bytestream_bytestream_java_grpc",
+        "@remoteapis//:build_bazel_remote_execution_v2_remote_execution_java_proto",
+        "//third_party/grpc-java:grpc-jar",
+        "//src/main/protobuf:remote_execution_log_java_proto",
+    ],
+)

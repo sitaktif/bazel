@@ -1666,6 +1666,108 @@ EOF
       || fail "different result 2 [$(cat bazel-bin/a/test.txt)] [$(cat $TEST_TMPDIR/test_expected)]"
 }
 
+# This case covers a case where:
+# - target //a:first creates a file first.txt (locally, by
+#   tagging as "no-remote" with "--modify_execution_info").
+# - target //a:second copies first.txt to second.txt, remotely.
+#
+# When --disk_cache is set, the first FindMissingBlobs includes all the inputs except first.txt, and
+# it is only after getting a missing blob error from the remote executor that a second
+# FindMissingBlobs with all the inputs is sent (followed by a Write of that missing input), and that
+# the Execute is successful.
+#
+# This is not something that the client will see externally, but we expect Bazel to include all the
+# inputs in the initial FindMissingBlobs.
+#
+# Weirdly, when --disk_cache is not set, Bazel behaves correctly: the first FindMissingBlobs
+# contains all the inputs, including first.txt.
+function test_combined_disk_cache_remote_exec_with_no_remote_exec_mnemonic_dependency() {
+  rm -rf ${TEST_TMPDIR}/test_expected
+
+  grpc_log=${TEST_TMPDIR}/grpc.log
+  execute_responses_log=${TEST_TMPDIR}/execute_responses.txt
+
+  local cache="${TEST_TMPDIR}/disk_cache"
+  local flags=("--disk_cache=$cache"
+               "--remote_executor=grpc://localhost:${worker_port}"
+               "--spawn_strategy=remote,local"
+               "--genrule_strategy=remote,local"
+               "--modify_execution_info=MyMnemonic=+no-remote-exec"
+               # Remote execution servers often deny uploads of local results for security reasons.
+               # This doesn't deny uploads of locally-built blobs, only uploads of action results.
+               "--noremote_upload_local_results"
+               "--remote_grpc_log=$grpc_log")
+
+  mkdir -p a
+
+  cat > a/mycmd.bzl <<'EOF'
+def _impl(ctx):
+    name = ctx.attr.name
+    myoutput_file = ctx.actions.declare_file(name + ".txt")
+    ctx.actions.run_shell(
+        command = "cat {} > {}".format(ctx.file.input_file.path, myoutput_file.path),
+        inputs = [ctx.file.input_file],
+        outputs = [myoutput_file],
+        mnemonic = "MyMnemonic",
+    )
+    return DefaultInfo(files = depset([myoutput_file]))
+
+mycmd = rule(
+    implementation = _impl,
+    attrs = {
+        "input_file": attr.label(allow_single_file=True)
+    }
+)
+EOF
+
+  echo "$RANDOM-$RANDOM-$RANDOM-$RANDOM" > a/zero.txt
+  foo_txt_checksum=$(sha256sum a/zero.txt | cut -d' ' -f1)
+  foo_txt_size=$(stat -f %z a/zero.txt)
+
+  cat > a/BUILD <<'EOF'
+package(default_visibility = ["//visibility:public"])
+load("//a:mycmd.bzl", "mycmd")
+
+# Copy zero.txt to first.txt, locally.
+# Use a custom rule so we can tag the action as "no-remote"
+# by matching the mnemonic with --modify_execution_info.
+mycmd(
+    name = "first",
+    input_file = "zero.txt",
+)
+
+# Copy first.txt to second.txt, remotely.
+genrule(
+    name = "second",
+    srcs = [":first"],
+    outs = ["second.txt"],
+    cmd = "cat $< > $@",
+)
+EOF
+
+  rm -rf $cache
+  mkdir $cache
+
+  failure_msg=""
+  if ! bazel build "${flags[@]}" //a:second.txt &> $TEST_log; then
+    failure_msg+="Build failed. Checking partial grpc log... "
+  fi
+
+  # Prints the grpc log in text format and checks expected properties along the way.
+  grpc_log_checker=$(rlocation "io_bazel/src/test/tools/grpcdecoder/grpc_check_disk_cache_with_no_remote_exec_dep")
+  which ${grpc_log_checker}
+  set -x
+  if ! $grpc_log_checker ${TEST_TMPDIR}/grpc.log ${foo_txt_checksum} ${foo_txt_size} &> $execute_responses_log; then
+    failure_msg+="GRPC logs checks failed (see GRPC logs above)."
+  fi
+  set +x
+
+  if [[ -n $failure_msg ]]; then
+    [[ -f $execute_responses_log ]] && cat $execute_responses_log
+    fail "${failure_msg}"
+  fi
+}
+
 function test_genrule_combined_disk_grpc_cache() {
   # Test for the combined disk and grpc cache.
   # Built items should be pushed to both the disk and grpc cache.
